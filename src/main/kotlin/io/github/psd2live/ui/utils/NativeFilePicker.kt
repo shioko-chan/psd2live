@@ -64,7 +64,7 @@ object NativeFilePicker {
 		val title = tr("project.open")
 		try {
 			val dialog = FileDialog(window, title, FileDialog.LOAD).apply {
-				setFilenameFilter { _, name -> name.endsWith(".psd2live", ignoreCase = true) }
+				setFilenameFilter { _, name -> name.endsWith(".psd2live", ignoreCase = true) || name == "session.psd2live-recovery" }
 				file = "*.psd2live"
 				if (!initialPath.isNullOrBlank()) {
 					val f = File(initialPath)
@@ -76,7 +76,7 @@ object NativeFilePicker {
 			val selectedFile = dialog.file
 			if (!dir.isNullOrBlank() && !selectedFile.isNullOrBlank()) {
 				val full = File(dir, selectedFile).toPath().toAbsolutePath().normalize().toString()
-				if (full.endsWith(".psd2live", ignoreCase = true)) {
+				if (full.endsWith(".psd2live", ignoreCase = true) || File(full).name == "session.psd2live-recovery") {
 					return full
 				}
 			}
@@ -86,7 +86,7 @@ object NativeFilePicker {
 			UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName())
 			val chooser = JFileChooser().apply {
 				dialogTitle = title
-				fileFilter = javax.swing.filechooser.FileNameExtensionFilter("PSD2Live (*.psd2live)", "psd2live")
+				fileFilter = javax.swing.filechooser.FileNameExtensionFilter("PSD2Live projects and recovery sessions", "psd2live", "psd2live-recovery")
 				if (!initialPath.isNullOrBlank()) {
 					val f = File(initialPath)
 					if (f.exists()) currentDirectory = if (f.isDirectory) f else f.parentFile

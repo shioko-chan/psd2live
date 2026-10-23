@@ -50,6 +50,7 @@ internal class ProjectSession(private val viewModel: PSD2LiveViewModel, private 
                 Files.writeString(root.resolve("README.txt"), "PSD2Live project v1. Unencrypted ZIP. manifest.json inventories SHA-256 checksums. source/original.psd is the original source; workspace/ contains immutable history snapshots, PNG resources, tasks and spatial references; workspace.json restores the UI. See docs/PROJECT_FORMAT.md.\n")
                 writeArchive(root, path, capture.projectId)
             }
+            workspace.projectDirectorySaved(path, state)
             viewModel.projectSaveFinished(path, capture.history.headNodeId, state)
             capture.history.headNodeId
             }
@@ -63,8 +64,15 @@ internal class ProjectSession(private val viewModel: PSD2LiveViewModel, private 
 
     suspend fun open(workspace: ViewModelAgentWorkspace, path: Path) = saves.withLock {
         val expected = viewModel.state.value
-        val root = withContext(Dispatchers.IO) { ProjectArchive.extract(path) }
+        val recovering = path.fileName.toString() == ProjectDirectory.MARKER
+        var directory: ProjectDirectory? = null
+        val root = withContext(Dispatchers.IO) {
+            if (recovering) ProjectDirectory.recover(path).also { directory = it }.root
+            else ProjectArchive.extract(path, ProjectDirectory.parent())
+        }
         try {
+            if (directory == null) directory = ProjectDirectory.adopt(root, path)
+            workspace.flushProjectPersistence()
             val manifest = ProjectArchive.readJson(root.resolve("manifest.json"))
             val id = manifest.getValue("projectId").jsonPrimitive.content
             val store = AgentWorkspaceStore(root.resolve("workspace"))
@@ -82,9 +90,17 @@ internal class ProjectSession(private val viewModel: PSD2LiveViewModel, private 
             val state = WorkspaceStateCodec.decode(JsonObject(ui))
             val source = root.resolve("source/original.psd")
             require(Files.isRegularFile(source)) { "Project has no original PSD" }
-            workspace.installProject(id, path.toAbsolutePath().normalize(), source, state, tree, store, expected)
+            workspace.installProject(id, directory.archive, source, state, tree, store, expected)
             // The opened archive's private extraction is the session's recovery store and source PSD.
-            workspace.rememberProjectDirectory(root)
-        } catch (failure: Throwable) { ProjectArchive.deleteTemporaryDirectory(root); throw failure }
+            workspace.rememberProjectDirectory(directory, expected)
+            if (recovering) viewModel.markProjectAuxiliaryChanged()
+        } catch (failure: Throwable) {
+            withContext(kotlinx.coroutines.NonCancellable + Dispatchers.IO) {
+                if (recovering) directory?.close(clean = false)
+                else if (directory != null) directory.close(clean = true)
+                else ProjectArchive.deleteOwnedDirectory(root, ProjectDirectory.parent())
+            }
+            throw failure
+        }
     }
 }

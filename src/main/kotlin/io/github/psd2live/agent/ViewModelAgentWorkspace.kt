@@ -80,8 +80,34 @@ class ViewModelAgentWorkspace(
         val store: AgentWorkspaceStore,
         val spatial: Map<String, AgentViewSpatialMetadata>,
     )
-    private val projectDirectories = mutableListOf<Path>()
-    internal fun rememberProjectDirectory(path: Path) { projectDirectories.add(path) }
+    private val closing = java.util.concurrent.atomic.AtomicBoolean()
+    private val projectDirectories = mutableListOf<io.github.psd2live.project.ProjectDirectory>()
+    private val shutdownHook = Thread({ close() }, "psd2live-project-close")
+        .also { Runtime.getRuntime().addShutdownHook(it) }
+    internal fun rememberProjectDirectory(directory: io.github.psd2live.project.ProjectDirectory, previous: PSD2LiveState) {
+        synchronized(historyLock) {
+            // open() drained the old persistence queue before the compare-and-set install.
+            val old = projectDirectories.find { it.ownsSource(previous.loadedInputPath) }
+            if (old != null) {
+                runCatching {
+                    if (previous.projectDirty) try { checkpointRecovery(old, previous) }
+                    catch (failure: Throwable) { old.close(clean = false); throw failure }
+                    old.close(clean = !previous.projectDirty && !previous.projectSaving && persistenceError == null)
+                }.onFailure { System.err.println("Project recovery retained at ${old.root}: ${it.message}") }
+                projectDirectories.remove(old)
+            }
+            projectDirectories.add(directory)
+        }
+    }
+    private fun checkpointRecovery(directory: io.github.psd2live.project.ProjectDirectory, state: PSD2LiveState) {
+        io.github.psd2live.project.ProjectArchive.writeJsonAtomically(directory.root.resolve("workspace.json"),
+            io.github.psd2live.project.WorkspaceStateCodec.encode(state))
+    }
+    internal fun projectDirectorySaved(path: Path, captured: PSD2LiveState) {
+        synchronized(historyLock) {
+            projectDirectories.find { it.ownsSource(captured.loadedInputPath) }?.saved(path)
+        }
+    }
     internal suspend fun flushProjectPersistence() { persistenceScope.launch { }.join() }
 
     internal suspend fun importedPsd() = editMutex.withLock {
@@ -1532,9 +1558,31 @@ class ViewModelAgentWorkspace(
 		.joinToString("") { "%02x".format(it.toInt() and 0xff) }
 
 	override fun close() {
+        if (!closing.compareAndSet(false, true)) return
+        runCatching { Runtime.getRuntime().removeShutdownHook(shutdownHook) }
 		recoveryJob.cancel()
-		runBlocking { recoveryJob.join() }
-		persistenceJob.complete()
-		runBlocking { persistenceJob.join() }
+        val flushed = runBlocking {
+            kotlinx.coroutines.withTimeoutOrNull(5_000L) {
+                recoveryJob.join()
+                persistenceJob.complete()
+                persistenceJob.join()
+                true
+            } == true
+        }
+        synchronized(historyLock) {
+            val state = viewModel.state.value
+            val safe = flushed && persistenceError == null && pendingPersistenceWrites.get() == 0 &&
+                !state.projectSaving && !state.isAnalyzing && !state.isGenerating
+            projectDirectories.forEach { directory ->
+                val active = directory.ownsSource(state.loadedInputPath)
+                runCatching {
+                    if (active && state.projectDirty) try { checkpointRecovery(directory, state) }
+                    catch (failure: Throwable) { directory.close(clean = false); throw failure }
+                    directory.close(clean = safe && active && !state.projectDirty)
+                }
+                    .onFailure { System.err.println("Could not release project session ${directory.root}: ${it.message}") }
+            }
+            projectDirectories.clear()
+        }
 	}
 }

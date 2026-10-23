@@ -16,6 +16,13 @@ internal object ProjectArchive {
         Files.createDirectories(path.parent)
         Files.writeString(path, json.encodeToString(JsonElement.serializer(), value))
     }
+    fun writeJsonAtomically(path: Path, value: JsonElement) {
+        val temporary = Files.createTempFile(path.parent, ".recovery-", ".tmp")
+        try {
+            writeJson(temporary, value)
+            Files.move(temporary, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+        } finally { Files.deleteIfExists(temporary) }
+    }
     fun readJson(path: Path): JsonObject = json.parseToJsonElement(Files.readString(path)).jsonObject
     private fun digest(path: Path): String {
         val hash = MessageDigest.getInstance("SHA-256")
@@ -51,8 +58,8 @@ internal object ProjectArchive {
             Files.move(temporary, destination, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
         } finally { Files.deleteIfExists(temporary) }
     }
-    fun extract(file: Path): Path {
-        val root = Files.createTempDirectory("psd2live-project-").toAbsolutePath().normalize()
+    fun extract(file: Path, parent: Path = Path.of(System.getProperty("java.io.tmpdir"))): Path {
+        val root = Files.createTempDirectory(parent, "psd2live-project-").toAbsolutePath().normalize()
         try {
             ZipFile(file.toFile()).use { zip ->
                 val names = mutableSetOf<String>()
@@ -84,12 +91,16 @@ internal object ProjectArchive {
                 inventory.forEach { (name, hash) -> require(digest(root.resolve(name)) == hash.jsonPrimitive.content) { "Project resource checksum mismatch: $name" } }
             }
             return root
-        } catch (failure: Throwable) { deleteTemporaryDirectory(root); throw failure }
+        } catch (failure: Throwable) { deleteOwnedDirectory(root, parent); throw failure }
     }
     /** Only accepts directories created by this project subsystem in the OS temporary directory. */
     fun deleteTemporaryDirectory(root: Path) {
+        deleteOwnedDirectory(root, Path.of(System.getProperty("java.io.tmpdir")))
+    }
+    /** Delete only a directory explicitly allocated by this owner, without following symlinks. */
+    fun deleteOwnedDirectory(root: Path, parent: Path) {
         val path = root.toAbsolutePath().normalize()
-        require(path.parent == Path.of(System.getProperty("java.io.tmpdir")).toAbsolutePath().normalize() && path.fileName.toString().startsWith("psd2live-project-"))
+        require(path.parent == parent.toAbsolutePath().normalize() && path.fileName.toString().startsWith("psd2live-project-") && !Files.isSymbolicLink(path))
         Files.walk(path).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) }
     }
     fun installationProjectsDirectory(): Path {
